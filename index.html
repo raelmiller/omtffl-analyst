@@ -421,63 +421,45 @@ async function runAnalysis(question) {
     proxyUrl: PROXY
   };
 
-  // First Claude call: planning only — small response, just decide what data is needed
-  const planSystemPrompt = `You are a data analyst for OMTFFL XVI, a 16-team FPL Draft H2H league (16 teams, 38 GWs, Win=3pts, Draw=1pt, Loss=0pts).
-
-Respond ONLY with a compact JSON object (no markdown, no backticks, no explanation):
-{"needsPlayerData":false,"gwsNeeded":[],"plan":"one sentence"}
-
-needsPlayerData: true only if the question requires individual player scores/picks.
-gwsNeeded: only the specific GW numbers needed — if the question is about the whole season, still list all finished GWs as an array of ints.
-plan: one sentence describing what you will compute.`;
-
-  // Keep history short — just the last question/answer, stripped of any JSON data
+  // Keep history short
   const historySnippet = conversationHistory.length > 0
-    ? `\nPrevious Q&A:\n${conversationHistory.slice(-2).map(m => ({
-        role: m.role,
-        content: typeof m.content === 'string' ? m.content.replace(/Data: \{.*\}/s, '[data]').slice(0, 300) : ''
-      })).map(m => `${m.role}: ${m.content}`).join('\n')}`
+    ? `\nPrevious Q&A:\n${conversationHistory.slice(-2).map(m => `${m.role}: ${m.content.slice(0,200)}`).join('\n')}`
     : '';
 
-  // Step 1: lightweight planning call — just decide what data is needed
-  updateThinking('Planning...');
+  // Single lightweight call to decide if player data is needed
+  updateThinking('Thinking...');
 
-  const planPayload = JSON.stringify({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 300,
-    system: planSystemPrompt,
-    messages: [{ role: 'user', content: `Finished GWs: ${dataContext.maxGW}. Question: ${question}${historySnippet}` }]
-  });
-  console.log('Plan payload size:', planPayload.length, 'bytes');
-  const planRes = await fetch('https://omtffl-proxy.vercel.app/api/claude', {
+  const needsRes = await fetch('https://omtffl-proxy.vercel.app/api/claude', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: planPayload
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 120,
+      system: 'Respond ONLY with JSON (no markdown): {"needsPlayerData":false,"gwsNeeded":[]}. needsPlayerData=true only if the question needs individual player scores or picks. gwsNeeded should list the GW numbers as integers needed (all finished GWs if season-wide).',
+      messages: [{ role: 'user', content: `GWs 1-${dataContext.maxGW} finished. Question: ${question}` }]
+    })
   });
 
-  if (!planRes.ok) throw new Error(`API error ${planRes.status}`);
-  const planData = await planRes.json();
-  const rawText = planData.content[0].text.replace(/```json|```/g, '').trim();
-
-  let plan;
-  try { plan = JSON.parse(rawText); }
-  catch(e) { throw new Error(`Couldn't parse plan: ${rawText.slice(0,200)}`); }
+  if (!needsRes.ok) throw new Error(`API error ${needsRes.status}`);
+  const needsData = await needsRes.json();
+  let needsCheck = { needsPlayerData: false, gwsNeeded: [] };
+  try { needsCheck = JSON.parse(needsData.content[0].text.replace(/```json|```/g, '').trim()); }
+  catch(e) { /* default: no player data */ }
 
   // Fetch player data if needed
   let playerDataByGW = {};
   let picksDataByGW = {};
 
-  if (plan.needsPlayerData && plan.gwsNeeded?.length) {
-    const gwList = plan.gwsNeeded.slice(0, 10); // cap at 10 GWs
-    updateThinking(`Fetching player data for ${gwList.length} GW${gwList.length > 1 ? 's' : ''}...`);
+  if (needsCheck.needsPlayerData && needsCheck.gwsNeeded?.length) {
+    const gwList = needsCheck.gwsNeeded.map(Number).filter(n => n >= 1 && n <= dataContext.maxGW);
+    updateThinking(`Fetching data for GWs ${gwList.join(', ')}...`);
 
     await Promise.all(gwList.map(async gw => {
       const liveRes = await fetch(`${PROXY}?endpoint=live&id=${gw}`);
       if (liveRes.ok) playerDataByGW[gw] = await liveRes.json();
     }));
 
-    // Fetch picks for all teams for needed GWs
-    updateThinking('Fetching team picks...');
+    updateThinking('Fetching picks...');
     await Promise.all(gwList.map(async gw => {
       picksDataByGW[gw] = {};
       await Promise.all(league_entries.map(async e => {
@@ -487,7 +469,24 @@ plan: one sentence describing what you will compute.`;
     }));
   }
 
-  // Step 2: full analysis call — send all relevant data and get code + answer
+  // Step 2: slim down player data before sending to reduce payload size
+  const slimPlayerData = {};
+  Object.entries(playerDataByGW).forEach(([gw, gwData]) => {
+    slimPlayerData[gw] = { elements: {} };
+    Object.entries(gwData.elements || {}).forEach(([id, el]) => {
+      const s = el.stats || {};
+      slimPlayerData[gw].elements[id] = { stats: {
+        total_points: s.total_points || 0,
+        minutes: s.minutes || 0,
+        goals_scored: s.goals_scored || 0,
+        assists: s.assists || 0,
+        clean_sheets: s.clean_sheets || 0,
+        bonus: s.bonus || 0
+      }};
+    });
+  });
+
+  // Step 3: full analysis call — send all relevant data and get code + answer
   updateThinking('Analysing...');
 
   const codeSystemPrompt = `You are a data analyst for OMTFFL XVI, a 16-team FPL Draft H2H league (Win=3pts, Draw=1pt, Loss=0).
