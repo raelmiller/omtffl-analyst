@@ -514,16 +514,36 @@ Chart theme: backgroundColor arrays using #7fffb2/#ff6b6b/#ffd166, grid rgba(255
       system: codeSystemPrompt,
       messages: [{
         role: 'user',
-        content: `Data: ${JSON.stringify({
-          matches: dataContext.matches,
-          standings: dataContext.standings,
-          league_entries: dataContext.league_entries,
-          playerMap: dataContext.playerMap,
-          playerDataByGW,
-          picksDataByGW
-        })}${historySnippet}
+  content: (() => {
+          // Only include playerMap entries for players that appear in picks
+          const usedIds = new Set();
+          Object.values(picksDataByGW).forEach(gwData =>
+            Object.values(gwData).forEach(teamData =>
+              (teamData.picks || []).forEach(p => usedIds.add(String(p.element)))
+            )
+          );
+          // Also include from playerDataByGW
+          Object.values(playerDataByGW).forEach(gd =>
+            Object.keys(gd.elements || {}).forEach(id => usedIds.add(id))
+          );
+          const trimmedPlayerMap = {};
+          usedIds.forEach(id => {
+            if (dataContext.playerMap[id]) trimmedPlayerMap[id] = dataContext.playerMap[id];
+          });
+          // If no player data needed, still send a small sample for name lookups
+          const playerMapToSend = usedIds.size > 0 ? trimmedPlayerMap : dataContext.playerMap;
 
-Question: ${question}`
+          return `Data: ${JSON.stringify({
+            matches: dataContext.matches,
+            standings: dataContext.standings,
+            league_entries: dataContext.league_entries,
+            playerMap: playerMapToSend,
+            playerDataByGW,
+            picksDataByGW
+          })}${historySnippet}
+
+Question: ${question}`;
+        })()
       }]
     })
   });
