@@ -431,22 +431,28 @@ needsPlayerData: true only if the question requires individual player scores/pic
 gwsNeeded: only the specific GW numbers needed — if the question is about the whole season, still list all finished GWs as an array of ints.
 plan: one sentence describing what you will compute.`;
 
+  // Keep history short — just the last question/answer, stripped of any JSON data
   const historySnippet = conversationHistory.length > 0
-    ? `\nPrevious Q&A:\n${conversationHistory.slice(-4).map(m => `${m.role}: ${m.content}`).join('\n')}`
+    ? `\nPrevious Q&A:\n${conversationHistory.slice(-2).map(m => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content.replace(/Data: \{.*\}/s, '[data]').slice(0, 300) : ''
+      })).map(m => `${m.role}: ${m.content}`).join('\n')}`
     : '';
 
   // Step 1: lightweight planning call — just decide what data is needed
   updateThinking('Planning...');
 
+  const planPayload = JSON.stringify({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 300,
+    system: planSystemPrompt,
+    messages: [{ role: 'user', content: `Finished GWs: ${dataContext.maxGW}. Question: ${question}${historySnippet}` }]
+  });
+  console.log('Plan payload size:', planPayload.length, 'bytes');
   const planRes = await fetch('https://omtffl-proxy.vercel.app/api/claude', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 300,
-      system: planSystemPrompt,
-      messages: [{ role: 'user', content: `Finished GWs: ${dataContext.maxGW}. Question: ${question}${historySnippet}` }]
-    })
+    body: planPayload
   });
 
   if (!planRes.ok) throw new Error(`API error ${planRes.status}`);
@@ -538,7 +544,7 @@ Chart theme: backgroundColor arrays using #7fffb2/#ff6b6b/#ffd166, grid rgba(255
             standings: dataContext.standings,
             league_entries: dataContext.league_entries,
             playerMap: playerMapToSend,
-            playerDataByGW,
+            playerDataByGW: slimPlayerData,
             picksDataByGW
           })}${historySnippet}
 
@@ -567,7 +573,7 @@ Question: ${question}`;
     );
     const result = fn(
       dataContext.matches, dataContext.standings, dataContext.league_entries,
-      entryMap, dataContext.playerMap, playerDataByGW, picksDataByGW
+      entryMap, dataContext.playerMap, slimPlayerData, picksDataByGW
     );
 
     if (result && typeof result === 'object' && result.chartConfig) {
