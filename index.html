@@ -520,10 +520,16 @@ Variables available in the executed code:
 - picksDataByGW: {gw: {leagueEntryId: {picks: [{element, position, multiplier}]}}}
 - getBestXI(picks, gwElements, posMap): helper that applies FPL auto-sub rules to a picks array and returns the best valid XI score for that GW. picks = array of {element, position}, gwElements = playerDataByGW[gw].elements, posMap = object mapping elementId to position (1=GK,2=DEF,3=MID,4=FWD) built from playerMap as: const posMap = Object.fromEntries(Object.entries(playerMap).map(([id,p]) => [id, {GK:1,DEF:2,MID:3,FWD:4}[p.pos]||3]))
 
-For hypothetical "what if I kept my GW1 squad" questions:
+For hypothetical questions (e.g. "what if I kept my GW1 squad"):
 1. Get the target team's GW1 picks from picksDataByGW[1][leagueEntryId]
 2. For each GW, call getBestXI(gw1picks, playerDataByGW[gw].elements, posMap) to get the frozen squad's best valid score
 3. Compare to actual scores from matches data
+
+For bench points questions (e.g. "who left the most on the bench"):
+- Bench points = points scored by bench players (positions 12-15) that were NOT subbed in
+- For each GW per team: sum total_points of bench players (positions 12-15) who played (minutes > 0) but whose starting XI counterpart also played
+- In other words: points sitting on the bench that couldn't help because the player they would have replaced also played
+- Simpler approach: for each GW, bestScore = getBestXI(allPicks, gwElements, posMap), actualXI = sum of positions 1-11 points, benchLeft = bestScore - actualXI
 
 Rules for the code:
 - result must be a clean human-readable string, never raw JSON or object dumps
