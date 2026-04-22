@@ -542,10 +542,25 @@ Question: ${question}`
   const analysisRaw = analysisData.content[0].text.replace(/```json|```javascript|```/g, '').trim();
 
   let analysis;
-  try { analysis = JSON.parse(analysisRaw); }
-  catch(e) {
-    // Claude returned plain text instead of JSON — use it directly
-    return { text: formatText(analysisData.content[0].text), raw: analysisData.content[0].text };
+  try {
+    analysis = JSON.parse(analysisRaw);
+  } catch(e) {
+    // JSON.parse failed — likely because code contains unescaped newlines
+    // Try to extract the code block manually
+    const codeMatch = analysisRaw.match(/"code"\s*:\s*"([\s\S]*?)(?:"\s*,\s*"wantsChart"|"\s*\})/);
+    const chartMatch = analysisRaw.match(/"wantsChart"\s*:\s*(true|false)/);
+    if (codeMatch) {
+      const rawCode = codeMatch[1]
+        .replace(/\\n/g, '\n')
+        .replace(/\\"/g, '"')
+        .replace(/\\t/g, '\t');
+      analysis = { code: rawCode, wantsChart: chartMatch?.[1] === 'true' };
+    } else if (/result\s*=/.test(analysisRaw)) {
+      // Raw JS leaked out without JSON wrapper — use it directly
+      analysis = { code: analysisRaw, wantsChart: false };
+    } else {
+      return { text: formatText(analysisData.content[0].text), raw: analysisData.content[0].text };
+    }
   }
 
   updateThinking('Computing...');
