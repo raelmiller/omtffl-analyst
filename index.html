@@ -436,7 +436,7 @@ async function runAnalysis(question) {
       model: 'claude-sonnet-4-6',
       max_tokens: 120,
       system: 'Respond ONLY with JSON (no markdown): {"needsPlayerData":false,"gwsNeeded":[]}. needsPlayerData=true only if the question needs individual player scores or picks. gwsNeeded should list the GW numbers as integers needed (all finished GWs if season-wide).',
-      messages: [{ role: 'user', content: `GWs 1-${dataContext.maxGW} finished. Question: ${question}` }]
+      messages: [{ role: 'user', content: `GWs 1-${dataContext.maxGW} finished.${historySnippet}\n${historySnippet ? historySnippet + '\n' : ''}Question: ${question}` }]
     })
   });
 
@@ -489,27 +489,49 @@ async function runAnalysis(question) {
   // Step 3: full analysis call — send all relevant data and get code + answer
   updateThinking('Analysing...');
 
-  const codeSystemPrompt = `You are a data analyst for OMTFFL XVI, a 16-team FPL Draft H2H league (Win=3pts, Draw=1pt, Loss=0).
+  // Build team/manager context dynamically from loaded data
+  const teamContext = league_entries.map(e => {
+    const s = leagueData.standings.find(s => s.league_entry === e.id);
+    return `- "${e.entry_name}" (manager: ${e.player_first_name} ${e.player_last_name}, leagueEntryId: ${e.id}, rank: ${s?.rank ?? '?'}, W${s?.matches_won ?? 0}/D${s?.matches_drawn ?? 0}/L${s?.matches_lost ?? 0})`;
+  }).join('\n');
 
-You will be given league data and must respond with ONLY a JSON object (no markdown, no backticks):
-{
-  "code": "javascript that sets a variable called result",
-  "wantsChart": false
-}
+  const codeSystemPrompt = `You are a data analyst for OMTFFL XVI, a 16-team FPL Draft H2H fantasy football league. Season is 2024/25.
+Scoring: Win = 3pts, Draw = 1pt, Loss = 0pts. Each GW one team plays one other.
+The user asking questions is Rael Miller, manager of "Wait UnTel Tomorrow" (leagueEntryId: ${league_entries.find(e => e.entry_id === 196569)?.id ?? 'unknown'}).
 
-Variables available in the code:
+Teams in the league:
+${teamContext}
+
+When the user says "I" or "my team", they mean Wait UnTel Tomorrow / Rael Miller.
+When they say "last week" or "last GW", they mean GW${maxGW}.
+Interpret natural language flexibly — "best manager", "luckiest team", "who's been on form" etc should all map to appropriate computations.
+A "good" weekly score is 60+, "bad" is under 40. A close game is within 3pts. A blowout is 20+ pts.
+
+You must respond with ONLY a JSON object (no markdown, no backticks, no extra text):
+{"code": "javascript that sets a variable called result", "wantsChart": false}
+
+Variables available in the executed code:
 - matches: [{gw, e1, e1_pts, e2, e2_pts}]
 - standings: [{league_entry, rank, total, matches_won, matches_drawn, matches_lost, points_for}]
 - league_entries: [{id, entry_id, name, player}]
 - entryMap: {leagueEntryId: {name, player, entryId}}
-- playerMap: {elementId: {name, webName, pos}} — ALWAYS use playerMap[id]?.webName for player names
-- playerDataByGW: {gw: {elements: {elementId: {stats: {total_points, minutes, goals_scored, assists, ...}}}}}
+- playerMap: {elementId: {name, webName, pos}} — ALWAYS use playerMap[id]?.webName for player names, never show raw IDs
+- playerDataByGW: {gw: {elements: {elementId: {stats: {total_points, minutes, goals_scored, assists, clean_sheets, bonus}}}}}
 - picksDataByGW: {gw: {leagueEntryId: {picks: [{element, position, multiplier}]}}}
+- getBestXI(picks, gwElements, posMap): helper that applies FPL auto-sub rules to a picks array and returns the best valid XI score for that GW. picks = array of {element, position}, gwElements = playerDataByGW[gw].elements, posMap = object mapping elementId to position (1=GK,2=DEF,3=MID,4=FWD) built from playerMap as: const posMap = Object.fromEntries(Object.entries(playerMap).map(([id,p]) => [id, {GK:1,DEF:2,MID:3,FWD:4}[p.pos]||3]))
 
-result must be a clean, readable string answer. Use real names (playerMap, entryMap), never raw IDs or objects.
-For charts, set wantsChart:true and make result = {text:"summary", chartConfig:{...Chart.js 4 config...}}.
-Chart theme: backgroundColor arrays using #7fffb2/#ff6b6b/#ffd166, grid rgba(255,255,255,0.07), tick color #6b7280, legend color #e8eaf0.
-CRITICAL: The code value must be valid JavaScript. Always use * for multiplication. Do not include syntax errors.`;
+For hypothetical "what if I kept my GW1 squad" questions:
+1. Get the target team's GW1 picks from picksDataByGW[1][leagueEntryId]
+2. For each GW, call getBestXI(gw1picks, playerDataByGW[gw].elements, posMap) to get the frozen squad's best valid score
+3. Compare to actual scores from matches data
+
+Rules for the code:
+- result must be a clean human-readable string, never raw JSON or object dumps
+- Always use entryMap[id]?.name for team names, playerMap[id]?.webName for player names
+- Always use * for multiplication (never omit the operator)
+- For charts: wantsChart:true, result = {text: "summary sentence", chartConfig: {...Chart.js 4 config}}
+- Chart theme: colors #7fffb2/#ff6b6b/#ffd166, grid rgba(255,255,255,0.07), ticks #6b7280, legend #e8eaf0
+- If the question can't be answered with available data, set result to a helpful explanation of why`;
 
   // Only send small static data to Claude — never the player/picks data (too large)
   // Claude writes JS code that runs in the browser where the data is already available
@@ -566,13 +588,44 @@ Question: ${question}`
 
   updateThinking('Computing...');
 
+  // Helper: given a squad (picks array) + player points for a GW + posMap, return best valid XI score
+  // This implements FPL auto-sub rules: GK for GK, formation constraints, only sub in players who played
+  const getBestXI = (picks, gwElements, posMap) => {
+    const getPos = id => posMap[id] || 3;
+    const didPlay = id => (gwElements[String(id)]?.stats?.minutes || 0) > 0;
+    const getPts = id => gwElements[String(id)]?.stats?.total_points || 0;
+    const isValid = squad => {
+      const c = {1:0,2:0,3:0,4:0};
+      squad.forEach(p => { c[p.pos] = (c[p.pos]||0)+1; });
+      return c[1]>=1 && c[2]>=3 && c[3]>=2 && c[4]>=1 && squad.length===11;
+    };
+    const starters = picks.filter(p => p.position<=11).map(p => ({...p, pos: getPos(p.element)}));
+    const bench = picks.filter(p => p.position>11).sort((a,b) => a.position-b.position).map(p => ({...p, pos: getPos(p.element), used: false}));
+    // GK sub
+    const gkI = starters.findIndex(p => p.pos===1);
+    const gkB = bench.findIndex(p => p.pos===1);
+    if (gkI>=0 && gkB>=0 && !didPlay(starters[gkI].element) && didPlay(bench[gkB].element)) {
+      starters[gkI] = {...bench[gkB], pos:1}; bench[gkB].used = true;
+    }
+    // Outfield subs
+    for (const sub of bench) {
+      if (sub.used || sub.pos===1 || !didPlay(sub.element)) continue;
+      for (let i=0; i<starters.length; i++) {
+        if (starters[i].pos===1 || didPlay(starters[i].element)) continue;
+        const test = starters.map((s,j) => j===i ? {...sub} : s);
+        if (isValid(test)) { starters[i] = {...sub}; sub.used=true; break; }
+      }
+    }
+    return starters.reduce((sum, p) => sum + getPts(p.element), 0);
+  };
+
   try {
-    const fn = new Function('matches', 'standings', 'league_entries', 'entryMap', 'playerMap', 'playerDataByGW', 'picksDataByGW',
+    const fn = new Function('matches', 'standings', 'league_entries', 'entryMap', 'playerMap', 'playerDataByGW', 'picksDataByGW', 'getBestXI',
       `${analysis.code}; return result;`
     );
     const result = fn(
       dataContext.matches, dataContext.standings, dataContext.league_entries,
-      entryMap, dataContext.playerMap, slimPlayerData, picksDataByGW
+      entryMap, dataContext.playerMap, slimPlayerData, picksDataByGW, getBestXI
     );
 
     if (result && typeof result === 'object' && result.chartConfig) {
