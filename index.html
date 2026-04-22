@@ -510,47 +510,31 @@ result must be a clean, readable string answer. Use real names (playerMap, entry
 For charts, set wantsChart:true and make result = {text:"summary", chartConfig:{...Chart.js 4 config...}}.
 Chart theme: backgroundColor arrays using #7fffb2/#ff6b6b/#ffd166, grid rgba(255,255,255,0.07), tick color #6b7280, legend color #e8eaf0.`;
 
+  // Only send small static data to Claude — never the player/picks data (too large)
+  // Claude writes JS code that runs in the browser where the data is already available
+  const analysisPayload = JSON.stringify({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 4000,
+    system: codeSystemPrompt,
+    messages: [{
+      role: 'user',
+      content: `Static data: ${JSON.stringify({
+        matches: dataContext.matches,
+        standings: dataContext.standings,
+        league_entries: dataContext.league_entries
+      })}
+playerMap sample (first 5): ${JSON.stringify(Object.fromEntries(Object.entries(dataContext.playerMap).slice(0,5)))}
+playerDataByGW keys available: ${JSON.stringify(Object.keys(slimPlayerData).map(Number))}
+picksDataByGW keys available: ${JSON.stringify(Object.keys(picksDataByGW).map(Number))}
+${historySnippet}
+Question: ${question}`
+    }]
+  });
+  console.log('Analysis payload:', analysisPayload.length, 'bytes');
   const analysisRes = await fetch('https://omtffl-proxy.vercel.app/api/claude', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 4000,
-      system: codeSystemPrompt,
-      messages: [{
-        role: 'user',
-  content: (() => {
-          // Only include playerMap entries for players that appear in picks
-          const usedIds = new Set();
-          Object.values(picksDataByGW).forEach(gwData =>
-            Object.values(gwData).forEach(teamData =>
-              (teamData.picks || []).forEach(p => usedIds.add(String(p.element)))
-            )
-          );
-          // Also include from playerDataByGW
-          Object.values(playerDataByGW).forEach(gd =>
-            Object.keys(gd.elements || {}).forEach(id => usedIds.add(id))
-          );
-          const trimmedPlayerMap = {};
-          usedIds.forEach(id => {
-            if (dataContext.playerMap[id]) trimmedPlayerMap[id] = dataContext.playerMap[id];
-          });
-          // If no player data needed, still send a small sample for name lookups
-          const playerMapToSend = usedIds.size > 0 ? trimmedPlayerMap : dataContext.playerMap;
-
-          return `Data: ${JSON.stringify({
-            matches: dataContext.matches,
-            standings: dataContext.standings,
-            league_entries: dataContext.league_entries,
-            playerMap: playerMapToSend,
-            playerDataByGW: slimPlayerData,
-            picksDataByGW
-          })}${historySnippet}
-
-Question: ${question}`;
-        })()
-      }]
-    })
+    body: analysisPayload
   });
 
   if (!analysisRes.ok) throw new Error(`API error ${analysisRes.status}`);
